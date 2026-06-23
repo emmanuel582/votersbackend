@@ -11,11 +11,23 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || 'sk_test_placeholder';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+const allowedOrigins = [
+  'http://localhost:5173',
+  ...(process.env.FRONTEND_URL || '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean),
+];
 
 app.use(cors({
-  origin: [FRONTEND_URL, 'http://localhost:5173'],
-  credentials: true
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (/^https:\/\/[\w-]+\.vercel\.app$/.test(origin)) return callback(null, true);
+    callback(null, false);
+  },
+  credentials: true,
 }));
 
 app.get('/api/health', (_req, res) => {
