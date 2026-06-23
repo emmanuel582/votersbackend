@@ -57,6 +57,114 @@ router.get('/categories', async (req, res) => {
   }
 });
 
+router.get('/live-feed', async (req, res) => {
+  try {
+    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayMs = todayStart.getTime();
+
+    const { data: settings } = await supabaseAdmin
+      .from('app_settings')
+      .select('live_ticker_enabled, event_name, event_hashtag')
+      .eq('id', 'singleton')
+      .single();
+
+    if (settings?.live_ticker_enabled === false) {
+      return res.json({ enabled: false, stats: null, events: [], insights: [] });
+    }
+
+    const [{ data: allVotes }, { data: recentVotes }, { data: categories }] = await Promise.all([
+      supabaseAdmin.from('votes').select('id, created_at, category_id').eq('vote_recorded', true),
+      supabaseAdmin
+        .from('votes')
+        .select(`
+          id, voter_name, created_at,
+          nominees ( name, photo_url ),
+          categories ( name, emoji )
+        `)
+        .eq('vote_recorded', true)
+        .order('created_at', { ascending: false })
+        .limit(25),
+      supabaseAdmin.from('categories').select('id, name, emoji').eq('is_active', true),
+    ]);
+
+    const catMap = Object.fromEntries((categories || []).map((c) => [c.id, c]));
+    const votes = allVotes || [];
+
+    const votesLastHour = votes.filter((v) => new Date(v.created_at).getTime() > oneHourAgo);
+    const votesToday = votes.filter((v) => new Date(v.created_at).getTime() > todayMs);
+
+    const countByCategory = (list: typeof votes) => {
+      const counts: Record<string, number> = {};
+      list.forEach((v) => {
+        if (v.category_id) counts[v.category_id] = (counts[v.category_id] || 0) + 1;
+      });
+      return counts;
+    };
+
+    const hourByCat = countByCategory(votesLastHour);
+    const todayByCat = countByCategory(votesToday);
+
+    const topCategoryId = (counts: Record<string, number>) =>
+      Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+
+    const [hotCatId, hotCatCount] = topCategoryId(hourByCat) || [];
+    const [todayCatId, todayCatCount] = topCategoryId(todayByCat) || [];
+    const hotCategory = hotCatId ? catMap[hotCatId] : null;
+    const todayTopCategory = todayCatId ? catMap[todayCatId] : null;
+
+    const firstName = (name: string | null) => {
+      if (!name?.trim()) return 'Someone';
+      return name.trim().split(/\s+/)[0];
+    };
+
+    const events = (recentVotes || []).map((v: any) => ({
+      id: v.id,
+      voterName: firstName(v.voter_name),
+      nomineeName: v.nominees?.name || 'a nominee',
+      nomineePhoto: v.nominees?.photo_url || null,
+      categoryName: v.categories?.name || 'a category',
+      categoryEmoji: v.categories?.emoji || null,
+      createdAt: v.created_at,
+    }));
+
+    const insights: string[] = [];
+    if (events.length > 0) {
+      const latest = events[0]!;
+      insights.push(`${latest.voterName} just voted for ${latest.nomineeName.split(' ')[0]} 👑`);
+    }
+    if (votesLastHour.length > 0) {
+      insights.push(`${votesLastHour.length} vote${votesLastHour.length === 1 ? '' : 's'} in the last hour`);
+    }
+    if (hotCategory && hotCatCount) {
+      insights.push(`${hotCategory.emoji || '🔥'} ${hotCategory.name} is on fire — ${hotCatCount} this hour`);
+    }
+    if (todayTopCategory && todayCatCount && todayTopCategory.id !== hotCategory?.id) {
+      insights.push(`${todayTopCategory.emoji || '📈'} ${todayTopCategory.name} leads today with ${todayCatCount} votes`);
+    }
+    if (votes.length >= 5) {
+      insights.push(`${votes.length} total votes cast`);
+    }
+
+    res.json({
+      enabled: true,
+      eventName: settings?.event_name || 'School Awards',
+      hashtag: settings?.event_hashtag || '#SchoolAwards',
+      stats: {
+        votesLastHour: votesLastHour.length,
+        votesToday: votesToday.length,
+        totalVotes: votes.length,
+      },
+      events,
+      insights: [...new Set(insights)].slice(0, 6),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch live feed' });
+  }
+});
+
 router.get('/categories/:id', async (req, res) => {
   try {
     const { data: category } = await supabaseAdmin
