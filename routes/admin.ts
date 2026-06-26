@@ -29,22 +29,40 @@ const logAction = async (adminId: string, action: string, meta: any = {}) => {
 router.get('/stats', async (req: AdminRequest, res) => {
   try {
     await syncPendingVotes(20);
-    const { data: votes } = await supabaseAdmin.from('votes').select('amount, vote_recorded, paystack_status, created_at');
-    const totalAttempts = votes?.length || 0;
-    const recordedVotes = votes?.filter(v => v.vote_recorded) || [];
-    const totalVotes = recordedVotes.length;
     
-    // Revenue is calculated from recorded votes
+    const [{ count: totalAttempts }, { count: totalVotes }, { count: successfulAttempts }] = await Promise.all([
+      supabaseAdmin.from('votes').select('*', { count: 'exact', head: true }),
+      supabaseAdmin.from('votes').select('*', { count: 'exact', head: true }).eq('vote_recorded', true),
+      supabaseAdmin.from('votes').select('*', { count: 'exact', head: true }).eq('paystack_status', 'success')
+    ]);
+
+    let allVotesForStats: any[] = [];
+    let page = 0;
+    while (true) {
+      const { data } = await supabaseAdmin
+        .from('votes')
+        .select('amount, vote_recorded, paystack_status, created_at')
+        .range(page * 1000, (page + 1) * 1000 - 1);
+      
+      if (data && data.length > 0) {
+        allVotesForStats.push(...data);
+        if (data.length < 1000) break;
+        page++;
+      } else {
+        break;
+      }
+    }
+
+    const recordedVotes = allVotesForStats.filter(v => v.vote_recorded);
     const totalRevenue = recordedVotes.reduce((sum, v) => sum + (v.amount || 0), 0) / 100; // in Naira
-    const successfulAttempts = votes?.filter(v => v.paystack_status === 'success').length || 0;
     
-    const successRate = totalAttempts > 0 ? Math.round((successfulAttempts / totalAttempts) * 100) : 100;
+    const successRate = (totalAttempts && totalAttempts > 0) ? Math.round(((successfulAttempts || 0) / totalAttempts) * 100) : 100;
 
     // Sparkline calculation
     const now = new Date().getTime();
     const sparkline = Array(12).fill(0);
-    
-    votes?.forEach(v => {
+
+    allVotesForStats.forEach(v => {
       const voteTime = new Date(v.created_at).getTime();
       const diffMins = (now - voteTime) / (1000 * 60);
       if (diffMins >= 0 && diffMins < 60) {
@@ -84,13 +102,26 @@ router.get('/leaderboard', async (req: AdminRequest, res) => {
 
     if (!categories) return res.json([]);
 
-    const { data: allVotes } = await supabaseAdmin
-      .from('votes')
-      .select('nominee_id')
-      .eq('vote_recorded', true);
+    let allVotes: any[] = [];
+    let pageLeader = 0;
+    while (true) {
+      const { data } = await supabaseAdmin
+        .from('votes')
+        .select('nominee_id')
+        .eq('vote_recorded', true)
+        .range(pageLeader * 1000, (pageLeader + 1) * 1000 - 1);
+      
+      if (data && data.length > 0) {
+        allVotes.push(...data);
+        if (data.length < 1000) break;
+        pageLeader++;
+      } else {
+        break;
+      }
+    }
     
     const voteCounts: Record<string, number> = {};
-    allVotes?.forEach(v => {
+    allVotes.forEach(v => {
       voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + 1;
     });
 
@@ -224,7 +255,7 @@ router.delete('/categories/:id', async (req: AdminRequest, res) => {
   // Check votes first
   const { count } = await supabaseAdmin.from('votes').select('*', { count: 'exact', head: true }).eq('category_id', req.params.id);
   if (count && count > 0) return res.status(400).json({ error: 'Category has votes. Deactivate instead.' });
-  
+
   await supabaseAdmin.from('categories').delete().eq('id', req.params.id);
   await logAction(req.admin!.id, 'Deleted category', { category_id: req.params.id });
   res.json({ success: true });
@@ -291,12 +322,12 @@ router.delete('/nominees/:id', async (req: AdminRequest, res) => {
 // ==========================================
 router.patch('/settings', async (req: AdminRequest, res) => {
   const updates = req.body;
-  
+
   // Only super admin can change vote_price_kobo
   if (updates.vote_price_kobo && req.admin!.role !== 'super_admin') {
     delete updates.vote_price_kobo;
   }
-  
+
   const { data } = await supabaseAdmin.from('app_settings').update(updates).eq('id', 'singleton').select().single();
   await logAction(req.admin!.id, 'Updated settings', updates);
   res.json(data);
@@ -338,7 +369,7 @@ router.post('/users/invite', requireSuperAdmin, async (req: AdminRequest, res) =
 
     // Invite via Supabase Auth
     const { data: authData, error: authError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email);
-    
+
     if (authError) {
       return res.status(400).json({ error: authError.message });
     }

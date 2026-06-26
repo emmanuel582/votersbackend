@@ -25,14 +25,27 @@ router.get('/categories', async (req, res) => {
 
     if (!categories) return res.json({ settings, categories: [] });
 
-    // Get vote counts
-    const { data: allVotes } = await supabaseAdmin
-      .from('votes')
-      .select('nominee_id')
-      .eq('vote_recorded', true);
+    // Get all votes for counting (paginated to bypass 1000 limit)
+    let allVotes: any[] = [];
+    let page = 0;
+    while (true) {
+      const { data } = await supabaseAdmin
+        .from('votes')
+        .select('nominee_id')
+        .eq('vote_recorded', true)
+        .range(page * 1000, (page + 1) * 1000 - 1);
+
+      if (data && data.length > 0) {
+        allVotes.push(...data);
+        if (data.length < 1000) break;
+        page++;
+      } else {
+        break;
+      }
+    }
 
     const voteCounts: Record<string, number> = {};
-    allVotes?.forEach(v => {
+    allVotes.forEach(v => {
       voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + 1;
     });
 
@@ -74,8 +87,45 @@ router.get('/live-feed', async (req, res) => {
       return res.json({ enabled: false, stats: null, events: [], insights: [] });
     }
 
-    const [{ data: allVotes }, { data: recentVotes }, { data: categories }] = await Promise.all([
-      supabaseAdmin.from('votes').select('id, created_at, category_id').eq('vote_recorded', true),
+    // Get exact counts without downloading all rows
+    const { count: totalVotes } = await supabaseAdmin
+      .from('votes')
+      .select('*', { count: 'exact', head: true })
+      .eq('vote_recorded', true);
+
+    const { count: votesLastHour } = await supabaseAdmin
+      .from('votes')
+      .select('*', { count: 'exact', head: true })
+      .eq('vote_recorded', true)
+      .gte('created_at', new Date(oneHourAgo).toISOString());
+
+    const { count: votesToday } = await supabaseAdmin
+      .from('votes')
+      .select('*', { count: 'exact', head: true })
+      .eq('vote_recorded', true)
+      .gte('created_at', new Date(todayMs).toISOString());
+
+    // Fetch today's votes for trend calculation (paginated)
+    let votesTodayData: any[] = [];
+    let page = 0;
+    while (true) {
+      const { data } = await supabaseAdmin
+        .from('votes')
+        .select('category_id, created_at')
+        .eq('vote_recorded', true)
+        .gte('created_at', new Date(todayMs).toISOString())
+        .range(page * 1000, (page + 1) * 1000 - 1);
+
+      if (data && data.length > 0) {
+        votesTodayData.push(...data);
+        if (data.length < 1000) break;
+        page++;
+      } else {
+        break;
+      }
+    }
+
+    const [{ data: recentVotes }, { data: categories }] = await Promise.all([
       supabaseAdmin
         .from('votes')
         .select(`
@@ -90,12 +140,10 @@ router.get('/live-feed', async (req, res) => {
     ]);
 
     const catMap = Object.fromEntries((categories || []).map((c) => [c.id, c]));
-    const votes = allVotes || [];
 
-    const votesLastHour = votes.filter((v) => new Date(v.created_at).getTime() > oneHourAgo);
-    const votesToday = votes.filter((v) => new Date(v.created_at).getTime() > todayMs);
+    const votesLastHourData = votesTodayData.filter((v) => new Date(v.created_at).getTime() > oneHourAgo);
 
-    const countByCategory = (list: typeof votes) => {
+    const countByCategory = (list: any[]) => {
       const counts: Record<string, number> = {};
       list.forEach((v) => {
         if (v.category_id) counts[v.category_id] = (counts[v.category_id] || 0) + 1;
@@ -103,8 +151,8 @@ router.get('/live-feed', async (req, res) => {
       return counts;
     };
 
-    const hourByCat = countByCategory(votesLastHour);
-    const todayByCat = countByCategory(votesToday);
+    const hourByCat = countByCategory(votesLastHourData);
+    const todayByCat = countByCategory(votesTodayData);
 
     const topCategoryId = (counts: Record<string, number>) =>
       Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
@@ -134,8 +182,8 @@ router.get('/live-feed', async (req, res) => {
       const latest = events[0]!;
       insights.push(`${latest.voterName} just voted for ${latest.nomineeName.split(' ')[0]} 👑`);
     }
-    if (votesLastHour.length > 0) {
-      insights.push(`${votesLastHour.length} vote${votesLastHour.length === 1 ? '' : 's'} in the last hour`);
+    if ((votesLastHour || 0) > 0) {
+      insights.push(`${votesLastHour || 0} vote${votesLastHour === 1 ? '' : 's'} in the last hour`);
     }
     if (hotCategory && hotCatCount) {
       insights.push(`${hotCategory.emoji || '🔥'} ${hotCategory.name} is on fire — ${hotCatCount} this hour`);
@@ -143,8 +191,8 @@ router.get('/live-feed', async (req, res) => {
     if (todayTopCategory && todayCatCount && todayTopCategory.id !== hotCategory?.id) {
       insights.push(`${todayTopCategory.emoji || '📈'} ${todayTopCategory.name} leads today with ${todayCatCount} votes`);
     }
-    if (votes.length >= 5) {
-      insights.push(`${votes.length} total votes cast`);
+    if (totalVotes && totalVotes >= 5) {
+      insights.push(`${totalVotes} total votes cast`);
     }
 
     res.json({
@@ -152,9 +200,9 @@ router.get('/live-feed', async (req, res) => {
       eventName: settings?.event_name || 'School Awards',
       hashtag: settings?.event_hashtag || '#SchoolAwards',
       stats: {
-        votesLastHour: votesLastHour.length,
-        votesToday: votesToday.length,
-        totalVotes: votes.length,
+        votesLastHour: votesLastHour || 0,
+        votesToday: votesToday || 0,
+        totalVotes: totalVotes || 0,
       },
       events,
       insights: [...new Set(insights)].slice(0, 6),
