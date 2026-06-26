@@ -30,18 +30,41 @@ const logAction = async (adminId, action, meta = {}) => {
 router.get('/stats', async (req, res) => {
     try {
         await (0, paystackVote_js_1.syncPendingVotes)(20);
-        const { data: votes } = await supabase_js_1.supabaseAdmin.from('votes').select('amount, vote_recorded, paystack_status, created_at');
-        const totalAttempts = votes?.length || 0;
-        const recordedVotes = votes?.filter(v => v.vote_recorded) || [];
-        const totalVotes = recordedVotes.length;
-        // Revenue is calculated from recorded votes
+        const [{ count: totalAttempts }, { count: successfulAttempts }] = await Promise.all([
+            supabase_js_1.supabaseAdmin.from('votes').select('*', { count: 'exact', head: true }),
+            supabase_js_1.supabaseAdmin.from('votes').select('*', { count: 'exact', head: true }).eq('paystack_status', 'success')
+        ]);
+        let allVotesForStats = [];
+        let page = 0;
+        while (true) {
+            const { data } = await supabase_js_1.supabaseAdmin
+                .from('votes')
+                .select('amount, vote_recorded, paystack_status, created_at, vote_count')
+                .range(page * 1000, (page + 1) * 1000 - 1);
+            if (data && data.length > 0) {
+                allVotesForStats.push(...data);
+                if (data.length < 1000)
+                    break;
+                page++;
+            }
+            else {
+                break;
+            }
+        }
+        let totalVotes = 0;
+        const recordedVotes = allVotesForStats.filter(v => {
+            if (v.vote_recorded) {
+                totalVotes += (v.vote_count || 1);
+                return true;
+            }
+            return false;
+        });
         const totalRevenue = recordedVotes.reduce((sum, v) => sum + (v.amount || 0), 0) / 100; // in Naira
-        const successfulAttempts = votes?.filter(v => v.paystack_status === 'success').length || 0;
-        const successRate = totalAttempts > 0 ? Math.round((successfulAttempts / totalAttempts) * 100) : 100;
+        const successRate = (totalAttempts && totalAttempts > 0) ? Math.round(((successfulAttempts || 0) / totalAttempts) * 100) : 100;
         // Sparkline calculation
         const now = new Date().getTime();
         const sparkline = Array(12).fill(0);
-        votes?.forEach(v => {
+        allVotesForStats.forEach(v => {
             const voteTime = new Date(v.created_at).getTime();
             const diffMins = (now - voteTime) / (1000 * 60);
             if (diffMins >= 0 && diffMins < 60) {
@@ -81,13 +104,27 @@ router.get('/leaderboard', async (req, res) => {
             .order('display_order');
         if (!categories)
             return res.json([]);
-        const { data: allVotes } = await supabase_js_1.supabaseAdmin
-            .from('votes')
-            .select('nominee_id')
-            .eq('vote_recorded', true);
+        let allVotes = [];
+        let pageLeader = 0;
+        while (true) {
+            const { data } = await supabase_js_1.supabaseAdmin
+                .from('votes')
+                .select('nominee_id, vote_count')
+                .eq('vote_recorded', true)
+                .range(pageLeader * 1000, (pageLeader + 1) * 1000 - 1);
+            if (data && data.length > 0) {
+                allVotes.push(...data);
+                if (data.length < 1000)
+                    break;
+                pageLeader++;
+            }
+            else {
+                break;
+            }
+        }
         const voteCounts = {};
-        allVotes?.forEach(v => {
-            voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + 1;
+        allVotes.forEach(v => {
+            voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + (v.vote_count || 1);
         });
         const finalData = categories.map((cat) => {
             let nList = cat.nominees?.map((n) => ({

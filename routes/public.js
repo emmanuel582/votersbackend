@@ -26,14 +26,28 @@ router.get('/categories', async (req, res) => {
             .order('display_order');
         if (!categories)
             return res.json({ settings, categories: [] });
-        // Get vote counts
-        const { data: allVotes } = await supabase_js_1.supabaseAdmin
-            .from('votes')
-            .select('nominee_id')
-            .eq('vote_recorded', true);
+        // Get all votes for counting (paginated to bypass 1000 limit)
+        let allVotes = [];
+        let page = 0;
+        while (true) {
+            const { data } = await supabase_js_1.supabaseAdmin
+                .from('votes')
+                .select('nominee_id, vote_count')
+                .eq('vote_recorded', true)
+                .range(page * 1000, (page + 1) * 1000 - 1);
+            if (data && data.length > 0) {
+                allVotes.push(...data);
+                if (data.length < 1000)
+                    break;
+                page++;
+            }
+            else {
+                break;
+            }
+        }
         const voteCounts = {};
-        allVotes?.forEach(v => {
-            voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + 1;
+        allVotes.forEach(v => {
+            voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + (v.vote_count || 1);
         });
         const formatted = categories.map((cat) => {
             const nominees = (cat.nominees || []).map((n) => ({
@@ -68,8 +82,43 @@ router.get('/live-feed', async (req, res) => {
         if (settings?.live_ticker_enabled === false) {
             return res.json({ enabled: false, stats: null, events: [], insights: [] });
         }
-        const [{ data: allVotes }, { data: recentVotes }, { data: categories }] = await Promise.all([
-            supabase_js_1.supabaseAdmin.from('votes').select('id, created_at, category_id').eq('vote_recorded', true),
+        let allLiveVotes = [];
+        let page = 0;
+        while (true) {
+            const { data } = await supabase_js_1.supabaseAdmin
+                .from('votes')
+                .select('category_id, created_at, vote_count')
+                .eq('vote_recorded', true)
+                .range(page * 1000, (page + 1) * 1000 - 1);
+            if (data && data.length > 0) {
+                allLiveVotes.push(...data);
+                if (data.length < 1000)
+                    break;
+                page++;
+            }
+            else {
+                break;
+            }
+        }
+        let totalVotes = 0;
+        let votesLastHour = 0;
+        let votesToday = 0;
+        const votesTodayData = [];
+        const votesLastHourData = [];
+        allLiveVotes.forEach(v => {
+            const c = v.vote_count || 1;
+            totalVotes += c;
+            const ts = new Date(v.created_at).getTime();
+            if (ts >= todayMs) {
+                votesToday += c;
+                votesTodayData.push(v);
+            }
+            if (ts > oneHourAgo) {
+                votesLastHour += c;
+                votesLastHourData.push(v);
+            }
+        });
+        const [{ data: recentVotes }, { data: categories }] = await Promise.all([
             supabase_js_1.supabaseAdmin
                 .from('votes')
                 .select(`
@@ -83,19 +132,16 @@ router.get('/live-feed', async (req, res) => {
             supabase_js_1.supabaseAdmin.from('categories').select('id, name, emoji').eq('is_active', true),
         ]);
         const catMap = Object.fromEntries((categories || []).map((c) => [c.id, c]));
-        const votes = allVotes || [];
-        const votesLastHour = votes.filter((v) => new Date(v.created_at).getTime() > oneHourAgo);
-        const votesToday = votes.filter((v) => new Date(v.created_at).getTime() > todayMs);
         const countByCategory = (list) => {
             const counts = {};
             list.forEach((v) => {
                 if (v.category_id)
-                    counts[v.category_id] = (counts[v.category_id] || 0) + 1;
+                    counts[v.category_id] = (counts[v.category_id] || 0) + (v.vote_count || 1);
             });
             return counts;
         };
-        const hourByCat = countByCategory(votesLastHour);
-        const todayByCat = countByCategory(votesToday);
+        const hourByCat = countByCategory(votesLastHourData);
+        const todayByCat = countByCategory(votesTodayData);
         const topCategoryId = (counts) => Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
         const [hotCatId, hotCatCount] = topCategoryId(hourByCat) || [];
         const [todayCatId, todayCatCount] = topCategoryId(todayByCat) || [];
@@ -120,8 +166,8 @@ router.get('/live-feed', async (req, res) => {
             const latest = events[0];
             insights.push(`${latest.voterName} just voted for ${latest.nomineeName.split(' ')[0]} 👑`);
         }
-        if (votesLastHour.length > 0) {
-            insights.push(`${votesLastHour.length} vote${votesLastHour.length === 1 ? '' : 's'} in the last hour`);
+        if ((votesLastHour || 0) > 0) {
+            insights.push(`${votesLastHour || 0} vote${votesLastHour === 1 ? '' : 's'} in the last hour`);
         }
         if (hotCategory && hotCatCount) {
             insights.push(`${hotCategory.emoji || '🔥'} ${hotCategory.name} is on fire — ${hotCatCount} this hour`);
@@ -129,17 +175,17 @@ router.get('/live-feed', async (req, res) => {
         if (todayTopCategory && todayCatCount && todayTopCategory.id !== hotCategory?.id) {
             insights.push(`${todayTopCategory.emoji || '📈'} ${todayTopCategory.name} leads today with ${todayCatCount} votes`);
         }
-        if (votes.length >= 5) {
-            insights.push(`${votes.length} total votes cast`);
+        if (totalVotes && totalVotes >= 5) {
+            insights.push(`${totalVotes} total votes cast`);
         }
         res.json({
             enabled: true,
             eventName: settings?.event_name || 'School Awards',
             hashtag: settings?.event_hashtag || '#SchoolAwards',
             stats: {
-                votesLastHour: votesLastHour.length,
-                votesToday: votesToday.length,
-                totalVotes: votes.length,
+                votesLastHour: votesLastHour || 0,
+                votesToday: votesToday || 0,
+                totalVotes: totalVotes || 0,
             },
             events,
             insights: [...new Set(insights)].slice(0, 6),
@@ -173,7 +219,8 @@ router.get('/categories/:id', async (req, res) => {
 // 1. Initialize Vote
 router.post('/vote/initialize', async (req, res) => {
     try {
-        const { nomineeId, categoryId, voterEmail, voterName } = req.body;
+        const { nomineeId, categoryId, voterEmail, voterName, voteCount = 1 } = req.body;
+        const qty = Math.max(1, parseInt(voteCount) || 1);
         if (!nomineeId || !categoryId || !voterEmail) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
@@ -198,7 +245,8 @@ router.post('/vote/initialize', async (req, res) => {
             return res.status(400).json({ error: 'Invalid or inactive nominee/category' });
         }
         const reference = `vote_${categoryId}_${nomineeId}_${Date.now()}_${(0, nanoid_1.nanoid)(6)}`;
-        const amount = settings?.vote_price_kobo || 10000;
+        const baseAmount = settings?.vote_price_kobo || 10000;
+        const amount = baseAmount * qty;
         // Create pending vote record
         const { error: insertError } = await supabase_js_1.supabaseAdmin
             .from('votes')
@@ -209,6 +257,7 @@ router.post('/vote/initialize', async (req, res) => {
             voter_email: voterEmail,
             voter_name: voterName,
             amount,
+            vote_count: qty,
             paystack_status: 'pending',
             vote_recorded: false
         });
