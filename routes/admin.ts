@@ -30,9 +30,8 @@ router.get('/stats', async (req: AdminRequest, res) => {
   try {
     await syncPendingVotes(20);
     
-    const [{ count: totalAttempts }, { count: totalVotes }, { count: successfulAttempts }] = await Promise.all([
+    const [{ count: totalAttempts }, { count: successfulAttempts }] = await Promise.all([
       supabaseAdmin.from('votes').select('*', { count: 'exact', head: true }),
-      supabaseAdmin.from('votes').select('*', { count: 'exact', head: true }).eq('vote_recorded', true),
       supabaseAdmin.from('votes').select('*', { count: 'exact', head: true }).eq('paystack_status', 'success')
     ]);
 
@@ -41,7 +40,7 @@ router.get('/stats', async (req: AdminRequest, res) => {
     while (true) {
       const { data } = await supabaseAdmin
         .from('votes')
-        .select('amount, vote_recorded, paystack_status, created_at')
+        .select('amount, vote_recorded, paystack_status, created_at, vote_count')
         .range(page * 1000, (page + 1) * 1000 - 1);
       
       if (data && data.length > 0) {
@@ -53,7 +52,14 @@ router.get('/stats', async (req: AdminRequest, res) => {
       }
     }
 
-    const recordedVotes = allVotesForStats.filter(v => v.vote_recorded);
+    let totalVotes = 0;
+    const recordedVotes = allVotesForStats.filter(v => {
+      if (v.vote_recorded) {
+        totalVotes += (v.vote_count || 1);
+        return true;
+      }
+      return false;
+    });
     const totalRevenue = recordedVotes.reduce((sum, v) => sum + (v.amount || 0), 0) / 100; // in Naira
     
     const successRate = (totalAttempts && totalAttempts > 0) ? Math.round(((successfulAttempts || 0) / totalAttempts) * 100) : 100;
@@ -107,7 +113,7 @@ router.get('/leaderboard', async (req: AdminRequest, res) => {
     while (true) {
       const { data } = await supabaseAdmin
         .from('votes')
-        .select('nominee_id')
+        .select('nominee_id, vote_count')
         .eq('vote_recorded', true)
         .range(pageLeader * 1000, (pageLeader + 1) * 1000 - 1);
       
@@ -122,7 +128,7 @@ router.get('/leaderboard', async (req: AdminRequest, res) => {
     
     const voteCounts: Record<string, number> = {};
     allVotes.forEach(v => {
-      voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + 1;
+      voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + (v.vote_count || 1);
     });
 
     const finalData = categories.map((cat: any) => {

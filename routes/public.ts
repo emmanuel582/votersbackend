@@ -31,7 +31,7 @@ router.get('/categories', async (req, res) => {
     while (true) {
       const { data } = await supabaseAdmin
         .from('votes')
-        .select('nominee_id')
+        .select('nominee_id, vote_count')
         .eq('vote_recorded', true)
         .range(page * 1000, (page + 1) * 1000 - 1);
 
@@ -46,7 +46,7 @@ router.get('/categories', async (req, res) => {
 
     const voteCounts: Record<string, number> = {};
     allVotes.forEach(v => {
-      voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + 1;
+      voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + (v.vote_count || 1);
     });
 
     const formatted = categories.map((cat: any) => {
@@ -87,43 +87,43 @@ router.get('/live-feed', async (req, res) => {
       return res.json({ enabled: false, stats: null, events: [], insights: [] });
     }
 
-    // Get exact counts without downloading all rows
-    const { count: totalVotes } = await supabaseAdmin
-      .from('votes')
-      .select('*', { count: 'exact', head: true })
-      .eq('vote_recorded', true);
-
-    const { count: votesLastHour } = await supabaseAdmin
-      .from('votes')
-      .select('*', { count: 'exact', head: true })
-      .eq('vote_recorded', true)
-      .gte('created_at', new Date(oneHourAgo).toISOString());
-
-    const { count: votesToday } = await supabaseAdmin
-      .from('votes')
-      .select('*', { count: 'exact', head: true })
-      .eq('vote_recorded', true)
-      .gte('created_at', new Date(todayMs).toISOString());
-
-    // Fetch today's votes for trend calculation (paginated)
-    let votesTodayData: any[] = [];
+    let allLiveVotes: any[] = [];
     let page = 0;
     while (true) {
       const { data } = await supabaseAdmin
         .from('votes')
-        .select('category_id, created_at')
+        .select('category_id, created_at, vote_count')
         .eq('vote_recorded', true)
-        .gte('created_at', new Date(todayMs).toISOString())
         .range(page * 1000, (page + 1) * 1000 - 1);
 
       if (data && data.length > 0) {
-        votesTodayData.push(...data);
+        allLiveVotes.push(...data);
         if (data.length < 1000) break;
         page++;
       } else {
         break;
       }
     }
+
+    let totalVotes = 0;
+    let votesLastHour = 0;
+    let votesToday = 0;
+    const votesTodayData: any[] = [];
+    const votesLastHourData: any[] = [];
+
+    allLiveVotes.forEach(v => {
+      const c = v.vote_count || 1;
+      totalVotes += c;
+      const ts = new Date(v.created_at).getTime();
+      if (ts >= todayMs) {
+        votesToday += c;
+        votesTodayData.push(v);
+      }
+      if (ts > oneHourAgo) {
+        votesLastHour += c;
+        votesLastHourData.push(v);
+      }
+    });
 
     const [{ data: recentVotes }, { data: categories }] = await Promise.all([
       supabaseAdmin
@@ -141,12 +141,12 @@ router.get('/live-feed', async (req, res) => {
 
     const catMap = Object.fromEntries((categories || []).map((c) => [c.id, c]));
 
-    const votesLastHourData = votesTodayData.filter((v) => new Date(v.created_at).getTime() > oneHourAgo);
+
 
     const countByCategory = (list: any[]) => {
       const counts: Record<string, number> = {};
       list.forEach((v) => {
-        if (v.category_id) counts[v.category_id] = (counts[v.category_id] || 0) + 1;
+        if (v.category_id) counts[v.category_id] = (counts[v.category_id] || 0) + (v.vote_count || 1);
       });
       return counts;
     };
@@ -236,7 +236,9 @@ router.get('/categories/:id', async (req, res) => {
 // 1. Initialize Vote
 router.post('/vote/initialize', async (req, res) => {
   try {
-    const { nomineeId, categoryId, voterEmail, voterName } = req.body;
+    const { nomineeId, categoryId, voterEmail, voterName, voteCount = 1 } = req.body;
+
+    const qty = Math.max(1, parseInt(voteCount) || 1);
 
     if (!nomineeId || !categoryId || !voterEmail) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -268,7 +270,8 @@ router.post('/vote/initialize', async (req, res) => {
     }
 
     const reference = `vote_${categoryId}_${nomineeId}_${Date.now()}_${nanoid(6)}`;
-    const amount = settings?.vote_price_kobo || 10000;
+    const baseAmount = settings?.vote_price_kobo || 10000;
+    const amount = baseAmount * qty;
 
     // Create pending vote record
     const { error: insertError } = await supabaseAdmin
@@ -280,6 +283,7 @@ router.post('/vote/initialize', async (req, res) => {
         voter_email: voterEmail,
         voter_name: voterName,
         amount,
+        vote_count: qty,
         paystack_status: 'pending',
         vote_recorded: false
       });
