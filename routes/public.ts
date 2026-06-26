@@ -355,37 +355,35 @@ router.get('/leaderboard', async (req, res) => {
       .from('categories')
       .select(`
         id, name, type, emoji, display_order,
-        nominees (
-          id, name, photo_url, subtitle,
-          votes ( id )
-        )
+        nominees ( id, name, photo_url, subtitle )
       `)
       .eq('is_active', true)
       .order('display_order');
 
     if (!categories) return res.json([]);
 
-    const formattedCategories = categories.map((cat: any) => {
-      let nomineesList = cat.nominees?.map((n: any) => {
-        return {
-          id: n.id,
-          name: n.name,
-          photo_url: n.photo_url,
-          subtitle: n.subtitle,
-          vote_count: n.votes?.length || 0
-        };
-      }) || [];
-      return { ...cat, nominees: nomineesList };
-    });
+    // Paginated vote totals — must use vote_count (same as admin leaderboard)
+    let allVotes: any[] = [];
+    let page = 0;
+    while (true) {
+      const { data } = await supabaseAdmin
+        .from('votes')
+        .select('nominee_id, vote_count')
+        .eq('vote_recorded', true)
+        .range(page * 1000, (page + 1) * 1000 - 1);
 
-    const { data: allVotes } = await supabaseAdmin
-      .from('votes')
-      .select('nominee_id')
-      .eq('vote_recorded', true);
+      if (data && data.length > 0) {
+        allVotes.push(...data);
+        if (data.length < 1000) break;
+        page++;
+      } else {
+        break;
+      }
+    }
 
     const voteCounts: Record<string, number> = {};
-    allVotes?.forEach(v => {
-      voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + 1;
+    allVotes.forEach(v => {
+      voteCounts[v.nominee_id] = (voteCounts[v.nominee_id] || 0) + (v.vote_count || 1);
     });
 
     const finalData = categories.map((cat: any) => {
